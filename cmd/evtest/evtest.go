@@ -5,9 +5,10 @@ package main
 import (
 	"errors"
 	"fmt"
-	"github.com/gvalkov/golang-evdev"
 	"os"
 	"strings"
+
+	"github.com/johan-bolmsjo/golang-evdev"
 )
 
 const (
@@ -102,37 +103,37 @@ func main() {
 	case 1:
 		dev, err = select_device()
 		if err != nil {
-			fmt.Println(err)
-			os.Exit(1)
+			fatalf("Failed to select device, error: %s\n", err)
 		}
 	case 2:
 		dev, err = evdev.Open(os.Args[1])
 		if err != nil {
-			fmt.Printf("unable to open input device: %s\n", os.Args[1])
-			os.Exit(1)
+			fatalf("Unable to open input device: %s\n", os.Args[1])
 		}
 	default:
-		fmt.Printf(usage + "\n")
-		os.Exit(1)
+		fatalf("%s\n", usage)
 	}
 
 	info := fmt.Sprintf("bus 0x%04x, vendor 0x%04x, product 0x%04x, version 0x%04x",
 		dev.Bustype, dev.Vendor, dev.Product, dev.Version)
 
-	repeat_info := dev.GetRepeatRate()
+	repeat, delay, err := dev.GetRepeatRate()
+	if err != nil {
+		fatalf("Failed to get repeat reate, error: %s\n", err)
+	}
 
 	fmt.Printf("Evdev protocol version: %d\n", dev.EvdevVersion)
 	fmt.Printf("Device name: %s\n", dev.Name)
 	fmt.Printf("Device info: %s\n", info)
-	fmt.Printf("Repeat settings: repeat %d. delay %d\n", repeat_info[0], repeat_info[1])
+	fmt.Printf("Repeat settings: repeat %d. delay %d\n", repeat, delay)
 	fmt.Printf("Device capabilities:\n")
 
-	// for ctype, codes := range dev.Capabilities {
-	// 	fmt.Printf("  Type %s %d\n", ctype.Name, ctype.Type)
-	// 	for i := range codes {
-	// 		fmt.Printf("   Code %d %s\n", codes[i].Code, codes[i].Name)
-	// 	}
-	// }
+	for ctype, codes := range dev.Capabilities {
+		fmt.Printf("  Type %s %d\n", ctype.Name, ctype.Type)
+		for i := range codes {
+			fmt.Printf("   Code %d %s\n", codes[i].Code, codes[i].Name)
+		}
+	}
 
 	fmt.Printf("Listening for events ...\n")
 
@@ -157,3 +158,8 @@ func main() {
 //     print('')
 //
 //
+
+func fatalf(format string, a ...interface{}) {
+	fmt.Fprintf(os.Stderr, format, a...)
+	os.Exit(1)
+}

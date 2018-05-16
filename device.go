@@ -10,15 +10,17 @@ import (
 	"path/filepath"
 	"strings"
 	"unsafe"
+
+	"github.com/npat-efault/poller"
 )
 
 // A Linux input device from which events can be read.
 type InputDevice struct {
 	Fn string // path to input device (devnode)
 
-	Name string   // device name
-	Phys string   // physical topology of device
-	File *os.File // an open file handle to the input device
+	Name string     // device name
+	Phys string     // physical topology of device
+	File *poller.FD // an open file handle to the input device
 
 	Bustype uint16 // bus type identifier
 	Vendor  uint16 // vendor identifier
@@ -33,7 +35,7 @@ type InputDevice struct {
 
 // Open an evdev input device.
 func Open(devnode string) (*InputDevice, error) {
-	f, err := os.Open(devnode)
+	f, err := poller.Open(devnode, poller.O_RO)
 	if err != nil {
 		return nil, err
 	}
@@ -42,8 +44,12 @@ func Open(devnode string) (*InputDevice, error) {
 	dev.Fn = devnode
 	dev.File = f
 
-	dev.set_device_info()
-	dev.set_device_capabilities()
+	if err := dev.set_device_info(); err != nil {
+		return nil, fmt.Errorf("read device info: %s", err)
+	}
+	if err := dev.set_device_capabilities(); err != nil {
+		return nil, fmt.Errorf("read device capabilities: %s", err)
+	}
 
 	return &dev, nil
 }
@@ -114,7 +120,7 @@ func (dev *InputDevice) String() string {
 			"  phys %s\n"+
 			"  bus 0x%04x, vendor 0x%04x, product 0x%04x, version 0x%04x\n"+
 			"  events %s",
-		dev.Fn, dev.File.Fd(), dev.Name, dev.Phys, dev.Bustype,
+		dev.Fn, dev.File.Sysfd(), dev.Name, dev.Phys, dev.Bustype,
 		dev.Vendor, dev.Product, dev.Version, evtypes_s)
 }
 
@@ -129,9 +135,15 @@ func (dev *InputDevice) set_device_capabilities() error {
 	codebits := new([(KEY_MAX + 1) / 8]byte)
 	// absbits  := new([6]byte)
 
-	err := ioctl(dev.File.Fd(), uintptr(EVIOCGBIT(0, EV_MAX)), unsafe.Pointer(evbits))
-	if err != 0 {
+	if err := dev.File.Lock(); err != nil {
 		return err
+	}
+	defer dev.File.Unlock()
+	sysfd := uintptr(dev.File.Sysfd())
+
+	errno := ioctl(sysfd, uintptr(EVIOCGBIT(0, EV_MAX)), unsafe.Pointer(evbits))
+	if errno != 0 {
+		return errno
 	}
 
 	// Build a map of the device's capabilities
@@ -139,7 +151,10 @@ func (dev *InputDevice) set_device_capabilities() error {
 		if evbits[evtype/8]&(1<<uint(evtype%8)) != 0 {
 			eventcodes := make([]CapabilityCode, 0)
 
-			ioctl(dev.File.Fd(), uintptr(EVIOCGBIT(evtype, KEY_MAX)), unsafe.Pointer(codebits))
+			if errno = ioctl(sysfd, uintptr(EVIOCGBIT(evtype, KEY_MAX)), unsafe.Pointer(codebits)); errno != 0 {
+				return errno
+			}
+
 			for evcode := 0; evcode < KEY_MAX; evcode++ {
 				if codebits[evcode/8]&(1<<uint(evcode%8)) != 0 {
 					c := CapabilityCode{evcode, ByEventType[evtype][evcode]}
@@ -164,18 +179,25 @@ func (dev *InputDevice) set_device_info() error {
 	name := new([MAX_NAME_SIZE]byte)
 	phys := new([MAX_NAME_SIZE]byte)
 
-	err := ioctl(dev.File.Fd(), uintptr(EVIOCGID), unsafe.Pointer(&info))
-	if err != 0 {
+	if err := dev.File.Lock(); err != nil {
 		return err
 	}
+	defer dev.File.Unlock()
+	sysfd := uintptr(dev.File.Sysfd())
 
-	ioctl(dev.File.Fd(), uintptr(EVIOCGNAME), unsafe.Pointer(name))
-	if err != 0 {
-		return err
+	errno := ioctl(sysfd, uintptr(EVIOCGID), unsafe.Pointer(&info))
+	if errno != 0 {
+		return errno
+	}
+
+	if errno = ioctl(sysfd, uintptr(EVIOCGNAME), unsafe.Pointer(name)); errno != 0 {
+		return errno
 	}
 
 	// it's ok if the topology info is not available
-	ioctl(dev.File.Fd(), uintptr(EVIOCGPHYS), unsafe.Pointer(phys))
+	if errno = ioctl(sysfd, uintptr(EVIOCGPHYS), unsafe.Pointer(phys)); errno != 0 {
+		return errno
+	}
 
 	dev.Name = bytes_to_string(name)
 	dev.Phys = bytes_to_string(phys)
@@ -186,28 +208,49 @@ func (dev *InputDevice) set_device_info() error {
 	dev.Version = info.version
 
 	ev_version := new(int)
-	ioctl(dev.File.Fd(), uintptr(EVIOCGVERSION), unsafe.Pointer(ev_version))
+
+	if errno = ioctl(sysfd, uintptr(EVIOCGVERSION), unsafe.Pointer(ev_version)); errno != 0 {
+		return errno
+	}
+
 	dev.EvdevVersion = *ev_version
 
 	return nil
 }
 
-// Get repeat rate as a two element array.
-//   [0] repeat rate in characters per second
-//   [1] amount of time that a key must be depressed before it will start
-//       to repeat (in milliseconds)
-func (dev *InputDevice) GetRepeatRate() *[2]uint {
-	repeat_delay := new([2]uint)
-	ioctl(dev.File.Fd(), uintptr(EVIOCGREP), unsafe.Pointer(repeat_delay))
+// Get repeat rate and delay.
+// Repeat rate is in characters per second. Delay is the amount of time in
+// milliseconds that a key must be depressed before it will start to repeat.
+func (dev *InputDevice) GetRepeatRate() (repeat, delay uint, err error) {
+	if err = dev.File.Lock(); err == nil {
+		return
+	}
+	defer dev.File.Unlock()
+	sysfd := uintptr(dev.File.Sysfd())
 
-	return repeat_delay
+	var t [2]uint
+	if errno := ioctl(sysfd, uintptr(EVIOCGREP), unsafe.Pointer(&t)); errno != 0 {
+		err = errno
+		return
+	}
+
+	repeat, delay = t[0], t[1]
+	return
 }
 
 // Set repeat rate and delay.
-func (dev *InputDevice) SetRepeatRate(repeat, delay uint) {
-	repeat_delay := new([2]uint)
-	repeat_delay[0], repeat_delay[1] = repeat, delay
-	ioctl(dev.File.Fd(), uintptr(EVIOCSREP), unsafe.Pointer(repeat_delay))
+func (dev *InputDevice) SetRepeatRate(repeat, delay uint) error {
+	if err := dev.File.Lock(); err == nil {
+		return err
+	}
+	defer dev.File.Unlock()
+	sysfd := uintptr(dev.File.Sysfd())
+
+	t := [2]uint{repeat, delay}
+	if errno := ioctl(sysfd, uintptr(EVIOCSREP), unsafe.Pointer(&t)); errno != 0 {
+		return errno
+	}
+	return nil
 }
 
 type CapabilityType struct {
