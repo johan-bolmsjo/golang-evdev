@@ -58,25 +58,31 @@ func Open(devnode string) (*InputDevice, error) {
 // capture all events from a device, like a macro pad, keyboard, or gaming
 // mouse.
 func (dev *InputDevice) Grab() error {
-
-	var v int = 1
-	err := ioctl(dev.File.Fd(), uintptr(EVIOCGRAB), unsafe.Pointer(&v))
-	if err != 0 {
+	if err := dev.File.Lock(); err != nil {
 		return err
 	}
+	defer dev.File.Unlock()
+	sysfd := uintptr(dev.File.Sysfd())
 
+	var v int = 1
+	if errno := ioctl(sysfd, uintptr(EVIOCGRAB), unsafe.Pointer(&v)); errno != 0 {
+		return errno
+	}
 	return nil
 }
 
 // Disable exclusive listening of the device.
 func (dev *InputDevice) UnGrab() error {
-
-	var v int = 0
-	err := ioctl(dev.File.Fd(), uintptr(EVIOCGRAB), unsafe.Pointer(&v))
-	if err != 0 {
+	if err := dev.File.Lock(); err != nil {
 		return err
 	}
+	defer dev.File.Unlock()
+	sysfd := uintptr(dev.File.Sysfd())
 
+	var v int = 0
+	if errno := ioctl(sysfd, uintptr(EVIOCGRAB), unsafe.Pointer(&v)); errno != 0 {
+		return errno
+	}
 	return nil
 }
 
