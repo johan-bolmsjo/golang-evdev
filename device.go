@@ -54,38 +54,6 @@ func Open(devnode string) (*InputDevice, error) {
 	return &dev, nil
 }
 
-// Enable exclusive listening of the device. This is useful if you want to
-// capture all events from a device, like a macro pad, keyboard, or gaming
-// mouse.
-func (dev *InputDevice) Grab() error {
-	if err := dev.File.Lock(); err != nil {
-		return err
-	}
-	defer dev.File.Unlock()
-	sysfd := uintptr(dev.File.Sysfd())
-
-	var v int = 1
-	if errno := ioctl(sysfd, uintptr(EVIOCGRAB), unsafe.Pointer(&v)); errno != 0 {
-		return errno
-	}
-	return nil
-}
-
-// Disable exclusive listening of the device.
-func (dev *InputDevice) UnGrab() error {
-	if err := dev.File.Lock(); err != nil {
-		return err
-	}
-	defer dev.File.Unlock()
-	sysfd := uintptr(dev.File.Sysfd())
-
-	var v int = 0
-	if errno := ioctl(sysfd, uintptr(EVIOCGRAB), unsafe.Pointer(&v)); errno != 0 {
-		return errno
-	}
-	return nil
-}
-
 // Read and return a slice of input events from device.
 func (dev *InputDevice) Read() ([]InputEvent, error) {
 	events := make([]InputEvent, 16)
@@ -285,22 +253,35 @@ func (dev *InputDevice) SetRepeatRate(repeat, delay uint) error {
 	return nil
 }
 
-// Grab the input device exclusively.
+// Enable exclusive listening of the device. This is useful if you want to
+// capture all events from a device, like a macro pad, keyboard, or gaming
+// mouse.
 func (dev *InputDevice) Grab() error {
-	grab := int(1)
-	if err := ioctl(dev.File.Fd(), uintptr(EVIOCGRAB), unsafe.Pointer(&grab)); err != 0 {
+	if err := dev.File.Lock(); err != nil {
 		return err
 	}
+	defer dev.File.Unlock()
+	sysfd := uintptr(dev.File.Sysfd())
 
+	// IOCTL use pointer value itself as indication to grab or release device.
+	var anyPtr int
+	if errno := ioctl(sysfd, uintptr(EVIOCGRAB), unsafe.Pointer(&anyPtr)); errno != 0 {
+		return errno
+	}
 	return nil
 }
 
-// Release a grabbed input device.
+// Disable exclusive listening of the device.
 func (dev *InputDevice) Release() error {
-	if err := ioctl(dev.File.Fd(), uintptr(EVIOCGRAB), unsafe.Pointer(nil)); err != 0 {
+	if err := dev.File.Lock(); err != nil {
 		return err
 	}
+	defer dev.File.Unlock()
+	sysfd := uintptr(dev.File.Sysfd())
 
+	if errno := ioctl(sysfd, uintptr(EVIOCGRAB), unsafe.Pointer(nil)); errno != 0 {
+		return errno
+	}
 	return nil
 }
 
